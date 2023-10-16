@@ -1,7 +1,9 @@
 [workspace]
+resolver = "2"
 members = [
     "node",
     "pallets/template",
+    "pallets/ocw",
     "runtime",
 ]
 [profile.release]
