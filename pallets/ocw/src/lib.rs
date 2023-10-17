@@ -18,9 +18,12 @@ pub use weights::*;
 
 #[frame_support::pallet]
 pub mod pallet {
-	use super::*;
-	use frame_support::pallet_prelude::*;
-	use frame_system::pallet_prelude::*;
+	use core::time::Duration;
+
+use super::*;
+	use frame_support::{pallet_prelude::{*, self, DispatchResult}, pallet};
+	use frame_system::{pallet_prelude::*, offchain::SignedPayload, ensure_signed, ensure_none};
+use sp_runtime::{traits::ValidateUnsigned, transaction_validity::{TransactionSource, TransactionValidity}, offchain::{storage::StorageValueRef, storage_lock::BlockAndTime}};
 
 	#[pallet::pallet]
 	pub struct Pallet<T>(_);
@@ -64,10 +67,54 @@ pub mod pallet {
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 
-		fn offchain_worker(_block_number: BlockNumberFor<T>) {
+		fn offchain_worker(block_number: BlockNumberFor<T>) {
 
-			log::info!("Hello from ⛓️⭐ Off-Chain Worker ⭐⛓️.");
+			log::info!("Hello from ⛓️🌟 Off-Chain Worker 🌟⛓️.");
 
+			const TX_TYPES: u32 = 4;
+			let modu = block_number.try_into().map_or(TX_TYPES, |bn: usize| (bn as u32) % TX_TYPES);
+
+			let result = match modu {
+				0 => Self::offchain_signed_tx(block_number),
+				1 => Self::offchain_unsigned_tx(block_number),
+				2 => Self::offchain_unsigned_tx_signed_payload(block_number),
+				3 => Self::fetch_remote_info(),
+				_ => Err(Error::<T>::UnknownOffchainMux),
+			};
+
+			if let Err(e) = result {
+				log::error!("offchain_worker error: {:?}", e);
+			}
+		}
+	}
+
+	#[pallet::validate_unsigned]
+	impl<T: Config> ValidateUnsigned for Pallet<T> {
+
+		type Call = Call<T>;
+
+		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
+
+			let valid_tx = |provide| ValidTransaction::with_tag_prefix("ocw-demo")
+				.priority(UNSIGNED_TXS_PRIORITY)
+				.and_provides([&provide])
+				.longevity(3)
+				.propagate(true)
+				.build();
+
+			match call {
+				Call::submit_number_unsigned {number : _number} => valid_tx(b"submit_number_unsigned".to_vec()),
+				Call::submit_number_unsigned_with_signed_payload {
+					ref payload,
+					ref signature
+				} => {
+					if !SignedPayload::<T>::verify::<T::AuthorityId>(payload, signature.clone()) {
+						return InvalidTransaction::BadProof.into();
+					}
+					valid_tx(b"submit_number_unsigned_with_signed_payload".to_vec())
+				},
+				_=> InvalidTransaction::Call.into(),
+			}
 		}
 	}
 
@@ -76,6 +123,81 @@ pub mod pallet {
 	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
+
+		//Submit signed number
+		#[pallet::weight(1000)]
+		pub fn submit_number_signed(origin: OriginFor<T>, number: u64) -> DispatchResult {
+
+			let who = ensure_signed(origin)?;
+
+			log::info!("Submit_number_signed: ({}, {:?}", number, who);
+			Self::append_or_replace_number(number);
+
+			Self::deposit_event(Event::NewNumber(Some(who), number));
+
+			Ok(())
+		}
+
+		//Submit unsigned number
+		#[pallet::weight(1000)]
+		pub fn submit_number_unsigned(origin: OriginFor<T>, number: u64) -> DispatchResult {
+			let _ = ensure_none(origin)?;
+
+			log::info!("Submit_number_unsigned: {}", number);
+			Self::append_or_replace_number(number);
+
+			Self::deposit_event(Event::NewNumber(None, number));
+
+			Ok(())
+		}
+
+		impl<T: Config> Pallet<T> {
+			fn append_or_replace_number(number: u64) {
+				Numbers::<T>::mutate(|numbers| {
+					if numbers.len() == NUM_VEC_LEN {
+						let _ = numbers.pop_front();
+					}
+					numbers.push_back(number);
+					log::info!("Number Vector: {:?}", numbers);
+				});
+			}
+		}
+
+		fn fetch_remote_info() -> Result<(), Error<T>> {
+			let s_info = StorageValueRef::persistent(b"offchain-demo::hn-info");
+
+			if let Ok(Some(info)) = s_info.get::<HackerNewsInfo>() {
+				log::info!("cached hn-info: {:?}", info);
+				return Ok(());
+			}
+
+			let mut lock = StorageLock::<BlockAndTime<Self>>::with_block_and_time_deadline(
+				b"offchain-demo::lock", LOCK_BLOCK_EXPIRATION,
+				Duration::from_millis(LOCK_TIMEOUT_EXPIRATION)
+			);
+
+			if let Ok(_guard) = lock.try_lock() {
+				match Self::fetch_n_parse() {
+					Ok(info) => {s_info.set(&info);}
+					Err(err) => {return Err(err);}
+				}
+			}
+			Ok(())
+		}
+
+		fn fetch_n_parse() -> Result<HackerNewsInfo, Error<T>> {
+			let resp_bytes = Self::fetch_from_remote().map_err(|e| {
+				log::error!("fetch_from_remote error: {:?}", e);
+				<Error<T>>::HttpFetchingError
+			})?;
+
+			let resp_str = str::from_utf8(&resp_bytes).map_err(|_| <Error<T>>::DeserializeToStrError)?;
+			log::info!("fetch_n_parse: {}", resp_str);
+
+			let info: HackerNewsInfo = serde
+		}
+
+
 		/// An example dispatchable that takes a singles value as a parameter, writes the value to
 		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
 		#[pallet::call_index(0)]
